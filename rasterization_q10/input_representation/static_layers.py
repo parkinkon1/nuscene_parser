@@ -121,14 +121,14 @@ def color_by_yaw(agent_yaw_in_radians: float,
     """
 
     # By adding pi, lanes in the same direction as the agent are colored blue.
-    angle = angle_diff(agent_yaw_in_radians, lane_yaw_in_radians, 2*np.pi) + np.pi
+    angle = angle_diff(agent_yaw_in_radians, lane_yaw_in_radians, 2 * np.pi) + np.pi
 
     # Convert to degrees per colorsys requirement
-    angle = angle * 180/np.pi
+    angle = angle * 180 / np.pi
 
-    normalized_rgb_color = colorsys.hsv_to_rgb(angle/360, 1., 1.)
+    normalized_rgb_color = colorsys.hsv_to_rgb(angle / 360, 1., 1.)
 
-    color = [color*255 for color in normalized_rgb_color]
+    color = [color * 255 for color in normalized_rgb_color]
 
     # To make the return type consistent with Color definition
     return color[0], color[1], color[2]
@@ -157,7 +157,6 @@ def draw_lanes_on_image(image: np.ndarray,
     for poses_along_lane in lanes.values():
 
         for start_pose, end_pose in zip(poses_along_lane[:-1], poses_along_lane[1:]):
-
             start_pixels = convert_to_pixel_coords(start_pose[:2], agent_global_coords,
                                                    agent_pixels, resolution)
             end_pixels = convert_to_pixel_coords(end_pose[:2], agent_global_coords,
@@ -225,7 +224,7 @@ class StaticLayerRasterizer(StaticLayerRepresentation):
     def __init__(self, helper: PredictHelper,
                  layer_names: List[str] = None,
                  colors: List[Color] = None,
-                 resolution: float = 0.1, # meters / pixel
+                 resolution: float = 0.1,  # meters / pixel
                  meters_ahead: float = 40, meters_behind: float = 10,
                  meters_left: float = 25, meters_right: float = 25):
 
@@ -293,3 +292,37 @@ class StaticLayerRasterizer(StaticLayerRepresentation):
                                        int(image_side_length / self.resolution))
 
         return image[row_crop, col_crop, :]
+
+    def generate_mask(self, translation, rotation, sample_token: str):
+
+        map_name = self.helper.get_map_name_from_sample_token(sample_token)
+
+        x, y = translation[:2]
+        yaw = quaternion_yaw(Quaternion(rotation))
+        yaw_corrected = correct_yaw(yaw)
+
+        image_side_length = 2 * max(self.meters_ahead, self.meters_behind, self.meters_left, self.meters_right)
+        image_side_length_pixels = int(image_side_length / self.resolution)
+        patchbox = get_patchbox(x, y, image_side_length)
+
+        angle_in_degrees = angle_of_rotation(yaw_corrected) * 180 / np.pi
+        canvas_size = (image_side_length_pixels, image_side_length_pixels)
+
+        masks = self.maps[map_name].get_map_mask(patchbox, angle_in_degrees, self.layer_names, canvas_size=canvas_size)# lane masks
+        agent_pixels = int(image_side_length_pixels / 2), int(image_side_length_pixels / 2)
+        base_image = np.zeros((image_side_length_pixels, image_side_length_pixels, 3))
+
+        lanes = get_lanes_in_radius(x, y, radius=50, discretization_meters=1, map_api=self.maps[map_name])
+        image_with_lanes = draw_lanes_on_image(base_image, lanes, (x, y), yaw,
+                                               agent_pixels, self.resolution, color_function=color_by_yaw)
+        rotation_mat = get_rotation_matrix(image_with_lanes.shape, yaw)
+        rotated_image = cv2.warpAffine(image_with_lanes, rotation_mat, image_with_lanes.shape[:2])
+        rotated_image = rotated_image.astype("uint8")
+
+        row_crop, col_crop = get_crops(self.meters_ahead, self.meters_behind, self.meters_left,
+                                       self.meters_right, self.resolution,
+                                       int(image_side_length / self.resolution))
+
+        image_show = rotated_image[row_crop, col_crop, :]
+
+        return masks, lanes, image_show
