@@ -297,18 +297,21 @@ class StaticLayerRasterizer(StaticLayerRepresentation):
 
         map_name = self.helper.get_map_name_from_sample_token(sample_token)
 
+        # translation factors (ego frame)
         x, y = translation[:2]
         yaw = quaternion_yaw(Quaternion(rotation))
         yaw_corrected = correct_yaw(yaw)
 
+        # 1. generate map masks
         image_side_length = 2 * max(self.meters_ahead, self.meters_behind, self.meters_left, self.meters_right)
         image_side_length_pixels = int(image_side_length / self.resolution)
         patchbox = get_patchbox(x, y, image_side_length)
-
         angle_in_degrees = angle_of_rotation(yaw_corrected) * 180 / np.pi
         canvas_size = (image_side_length_pixels, image_side_length_pixels)
 
-        masks = self.maps[map_name].get_map_mask(patchbox, angle_in_degrees, self.layer_names, canvas_size=canvas_size)# lane masks
+        masks = self.maps[map_name].get_map_mask(patchbox, angle_in_degrees, self.layer_names, canvas_size=canvas_size)
+
+        # 2. generate guided lanes
         agent_pixels = int(image_side_length_pixels / 2), int(image_side_length_pixels / 2)
         base_image = np.zeros((image_side_length_pixels, image_side_length_pixels, 3))
 
@@ -317,12 +320,18 @@ class StaticLayerRasterizer(StaticLayerRepresentation):
                                                agent_pixels, self.resolution, color_function=color_by_yaw)
         rotation_mat = get_rotation_matrix(image_with_lanes.shape, yaw)
         rotated_image = cv2.warpAffine(image_with_lanes, rotation_mat, image_with_lanes.shape[:2])
-        rotated_image = rotated_image.astype("uint8")
+        rotated_image_lanes = rotated_image.astype("uint8")
 
+        # 3. combine masks
+        images = []
+        for mask, color in zip(masks, self.colors):
+            images.append(change_color_of_binary_mask(np.repeat(mask[::-1, :, np.newaxis], 3, 2), color))
+        images.append(rotated_image_lanes)
+        image_show = self.combinator.combine(images)
+
+        # crop
         row_crop, col_crop = get_crops(self.meters_ahead, self.meters_behind, self.meters_left,
                                        self.meters_right, self.resolution,
                                        int(image_side_length / self.resolution))
 
-        image_show = rotated_image[row_crop, col_crop, :]
-
-        return masks, lanes, image_show
+        return np.array(images)[:, row_crop, col_crop, :], lanes, image_show

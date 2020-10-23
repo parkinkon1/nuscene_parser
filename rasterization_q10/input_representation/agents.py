@@ -275,32 +275,20 @@ class AgentBoxesWithFadedHistory(AgentRepresentation):
 
         return rotated_image[row_crop, col_crop].astype('uint8')
 
-    def generate_mask(self, translation, rotation, sample_token: str):
-
+    def generate_mask(self, translation, rotation, sample_token: str, base_image=None):
         buffer = max([self.meters_ahead, self.meters_behind, self.meters_left, self.meters_right]) * 2
         image_side_length = int(buffer / self.resolution)
         central_track_pixels = (image_side_length / 2, image_side_length / 2)
 
         base_image = np.zeros((image_side_length, image_side_length, 3))
-
-        history = self.helper.get_past_for_sample(sample_token,
-                                                  self.seconds_of_history,
-                                                  in_agent_frame=False,
-                                                  just_xy=False)
-        history = reverse_history(history)
-        present_time = self.helper.get_annotations_for_sample(sample_token)
-        history = add_present_time_to_history(present_time, history)
+        present_time_annotation = self.helper.get_annotations_for_sample(sample_token)
 
         agent_x, agent_y = translation[:2]
-        for ins_token, annot in history.items():
-            num_points = len(annot)
-            for i, annotation in enumerate(annot):
-                box = get_track_box(annotation, (agent_x, agent_y), central_track_pixels, self.resolution)
-                color = self.color_mapping(annotation['category_name'])
-                # Don't fade the colors if there is no history
-                if num_points > 1:
-                    color = fade_color(color, i, num_points - 1)
-                cv2.fillPoly(base_image, pts=[np.int0(box)], color=color)
+
+        for annotation in present_time_annotation:
+            box = get_track_box(annotation, (agent_x, agent_y), central_track_pixels, self.resolution)
+            color = self.color_mapping(annotation['category_name'])
+            cv2.fillPoly(base_image, pts=[np.int0(box)], color=color)
 
         center_agent_yaw = quaternion_yaw(Quaternion(rotation))
         rotation_mat = get_rotation_matrix(base_image.shape, center_agent_yaw)
