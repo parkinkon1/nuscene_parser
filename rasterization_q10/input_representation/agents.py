@@ -15,6 +15,52 @@ from nuscenes.prediction.input_representation.utils import convert_to_pixel_coor
 History = Dict[str, List[Dict[str, Any]]]
 
 
+def curvature(A, B, C):
+    # Augment Columns
+    A_aug = np.append(A, 1)
+    B_aug = np.append(B, 1)
+    C_aug = np.append(C, 1)
+
+    # Calculate Area of Triangle
+    matrix = np.column_stack((A_aug, B_aug, C_aug))
+    area = 1 / 2 * np.linalg.det(matrix)
+
+    # Special case: Two or more points are equal
+    if np.all(A == B) or np.all(B == C):
+        curvature = 0
+    else:
+        curvature = 4 * area / (np.linalg.norm(A - B) * np.linalg.norm(B - C) * np.linalg.norm(C - A))
+
+    # Return Menger curvature
+    return curvature
+
+
+def angle_diff(a, b):
+    if np.linalg.norm(a) == 0 or np.linalg.norm(b) == 0:
+        return 0
+    au = a / np.linalg.norm(a)
+    bu = b / np.linalg.norm(b)
+    return np.arccos(np.clip(np.dot(au, bu), -1.0, 1.0))
+
+
+def calculateCurve(points):
+    if len(points) < 3:
+        return 0
+    return abs(angle_diff(points[1] - points[0], points[-1] - points[0]))
+
+# def calculateCurve(points):
+#     if len(points) < 3:
+#         return 0
+#     curvature_list = np.empty(0)
+#     for i in range(len(points) - 2):
+#         A = points[i]
+#         B = points[i + 1]
+#         C = points[i + 2]
+#         curvature_value = abs(curvature(A, B, C))
+#         curvature_list = np.append(curvature_list, curvature_value)
+#     return np.average(curvature_list)
+
+
 def pixels_to_box_corners(row_pixel: int,
                           column_pixel: int,
                           length_in_pixels: float,
@@ -275,7 +321,7 @@ class AgentBoxesWithFadedHistory(AgentRepresentation):
 
         return rotated_image[row_crop, col_crop].astype('uint8')
 
-    def generate_mask(self, translation, rotation, sample_token: str, base_image=None):
+    def generate_mask(self, translation, rotation, sample_token: str, seconds=3, thres_min=None, thres_max=None):
         buffer = max([self.meters_ahead, self.meters_behind, self.meters_left, self.meters_right]) * 2
         image_side_length = int(buffer / self.resolution)
         central_track_pixels = (image_side_length / 2, image_side_length / 2)
@@ -285,10 +331,40 @@ class AgentBoxesWithFadedHistory(AgentRepresentation):
 
         agent_x, agent_y = translation[:2]
 
+        translation_xy = []
+        past_xy = []
+        future_xy = []
+
         for annotation in present_time_annotation:
+            past_xy_temp = self.helper.get_past_for_agent(
+                annotation['instance_token'], sample_token, seconds=seconds, in_agent_frame=False)
+            future_xy_temp = self.helper.get_future_for_agent(
+                annotation['instance_token'], sample_token, seconds=seconds, in_agent_frame=False)
+            curve = calculateCurve(future_xy_temp)
+
+            vel = self.helper.get_velocity_for_agent(annotation['instance_token'], sample_token)
+            accel = self.helper.get_acceleration_for_agent(annotation['instance_token'], sample_token)
+            yaw_rate = self.helper.get_heading_change_rate_for_agent(annotation['instance_token'], sample_token)
+
+            if thres_min is not None:
+                if curve < thres_min:
+                    continue
+            if thres_max is not None:
+                if curve > thres_max:
+                    continue
+
+            if annotation['category_name'].split('.')[0] != 'vehicle':
+                continue
+
+            translation_xy.append(annotation['translation'][:2])
+            past_xy.append(past_xy_temp)
+            future_xy.append(future_xy_temp)
+
             box = get_track_box(annotation, (agent_x, agent_y), central_track_pixels, self.resolution)
             color = self.color_mapping(annotation['category_name'])
             cv2.fillPoly(base_image, pts=[np.int0(box)], color=color)
+
+        xy_global = [np.asarray(past_xy), np.asarray(future_xy), np.asarray(translation_xy)]
 
         center_agent_yaw = quaternion_yaw(Quaternion(rotation))
         rotation_mat = get_rotation_matrix(base_image.shape, center_agent_yaw)
@@ -300,4 +376,91 @@ class AgentBoxesWithFadedHistory(AgentRepresentation):
                                        self.meters_left, self.meters_right, self.resolution,
                                        image_side_length)
 
-        return rotated_image[row_crop, col_crop].astype('uint8')
+        return rotated_image[row_crop, col_crop].astype('uint8'), xy_global
+
+    def generate_virtual_mask(self, translation, rotation, lanes, sample_token: str, thres_min=None, thres_max=None):
+        buffer = max([self.meters_ahead, self.meters_behind, self.meters_left, self.meters_right]) * 2
+        image_side_length = int(buffer / self.resolution)
+        central_track_pixels = (image_side_length / 2, image_side_length / 2)
+
+        base_image = np.zeros((image_side_length, image_side_length, 3))
+        present_time_annotation = self.helper.get_annotations_for_sample(sample_token)
+
+        agent_x, agent_y = translation[:2]
+
+        translation_xy = []
+        past_xy = []
+        future_xy = []
+
+        for lane in lanes:
+            length = len(lane)
+
+            if length < 14:
+                continue
+
+            location = None
+            is_collide = True
+            current_index = length // 2
+            for _ in range(5):
+                current_index = np.random.randint(low=0, high=length - 6)
+
+                if current_index + 6 > length - 1 or current_index - 6 < 0:
+                    continue
+
+                # filter lanes
+                location = lane[current_index, :2]
+
+                is_collide = False
+                for xy in translation_xy:
+                    diff = location - xy
+                    if np.linalg.norm(diff) < 6:
+                        is_collide = True
+                        break
+                if is_collide:
+                    continue
+                else:
+                    break
+            if is_collide:
+                continue
+
+            curve = calculateCurve(lane[current_index:current_index + 6, :2])
+            if thres_min is not None:
+                if curve < thres_min:
+                    continue
+            if thres_max is not None:
+                if curve > thres_max:
+                    continue
+            translation_xy.append(location)
+            past_xy.append(lane[current_index - 6:current_index])
+            future_xy.append(lane[current_index + 1:current_index + 7])
+
+            # draw virtual agent mask
+            ax, ay = lane[current_index, 0], lane[current_index, 1]
+            bx, by = lane[current_index + 1, 0], lane[current_index + 1, 1]
+            if ax == bx:
+                bx += 0.0001
+            rot = np.arctan((by - ay) / (bx - ax))
+
+            yaw_in_radians = quaternion_yaw(Quaternion(axis=[0, 0, 1], angle=rot))
+            row_pixel, column_pixel = convert_to_pixel_coords(
+                location, (agent_x, agent_y), central_track_pixels, self.resolution)
+
+            size = [2.2, 5.6, 2.1]
+            width = size[0] / self.resolution
+            length = size[1] / self.resolution
+
+            box = pixels_to_box_corners(row_pixel, column_pixel, length, width, yaw_in_radians)
+            cv2.fillPoly(base_image, pts=[np.int0(box)], color=(255, 255, 0))
+
+        xy_global = [np.asarray(past_xy), np.asarray(future_xy), np.asarray(translation_xy)]
+
+        center_agent_yaw = quaternion_yaw(Quaternion(rotation))
+        rotation_mat = get_rotation_matrix(base_image.shape, center_agent_yaw)
+
+        rotated_image = cv2.warpAffine(base_image, rotation_mat, (base_image.shape[1], base_image.shape[0]))
+
+        row_crop, col_crop = get_crops(self.meters_ahead, self.meters_behind,
+                                       self.meters_left, self.meters_right, self.resolution,
+                                       image_side_length)
+
+        return rotated_image[row_crop, col_crop].astype('uint8'), xy_global

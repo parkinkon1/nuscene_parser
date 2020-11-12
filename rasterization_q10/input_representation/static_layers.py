@@ -315,7 +315,7 @@ class StaticLayerRasterizer(StaticLayerRepresentation):
         agent_pixels = int(image_side_length_pixels / 2), int(image_side_length_pixels / 2)
         base_image = np.zeros((image_side_length_pixels, image_side_length_pixels, 3))
 
-        lanes = get_lanes_in_radius(x, y, radius=50, discretization_meters=1, map_api=self.maps[map_name])
+        lanes = get_lanes_in_radius(x, y, radius=50, discretization_meters=2, map_api=self.maps[map_name])
         image_with_lanes = draw_lanes_on_image(base_image, lanes, (x, y), yaw,
                                                agent_pixels, self.resolution, color_function=color_by_yaw)
         rotation_mat = get_rotation_matrix(image_with_lanes.shape, yaw)
